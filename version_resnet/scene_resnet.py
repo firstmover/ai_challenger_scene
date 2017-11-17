@@ -19,36 +19,35 @@ from config import Config
 from synset import *
 import utility_tensorflow as utils
 
-root = "/scratch/lyc/ai_challenger_scene/"
+import scene_config as c
 
-data_dir = os.path.join(root, "data")
-eval_dir = os.path.join(root, "tmp/eval")
-checkpoint_dir = os.path.join(root, "tmp/checkpoint")
-model_dir = os.path.join(root, "model")
+data_dir = c.data_dir
+model_dir = c.model_dir
 
-MOVING_AVERAGE_DECAY = 0.9997
-BN_DECAY = MOVING_AVERAGE_DECAY
-BN_EPSILON = 0.001
-CONV_WEIGHT_DECAY = 0.00004
-CONV_WEIGHT_STDDEV = 0.1
-FC_WEIGHT_DECAY = 0.00004
-FC_WEIGHT_STDDEV = 0.01
+BN_DECAY = c.BN_DECAY
+BN_EPSILON = c.BN_EPSILON
+CONV_WEIGHT_DECAY = c.CONV_WEIGHT_DECAY
+CONV_WEIGHT_STDDEV = c.CONV_WEIGHT_STDDEV
+FC_WEIGHT_DECAY = c.FC_WEIGHT_DECAY
+FC_WEIGHT_STDDEV = c.FC_WEIGHT_STDDEV
+
+input_size = c.input_size
+
+activation = c.activation
+
 RESNET_VARIABLES = 'resnet_variables'
 UPDATE_OPS_COLLECTION = 'resnet_update_ops'
 RESNET_FC_VARIABLES = 'resnet_fc_variables'
 IMAGENET_MEAN_BGR = [103.062623801, 115.902882574, 123.151630838]
 IMAGENET_MEAN_RGB = [123.151630838, 115.902882574, 103.062623801]
 
-input_size = 224
-
-activation = tf.nn.relu
-
 
 def inference(x, is_training,
               num_classes=1000,
               num_blocks=None,  
               use_bias=False,  # defaults to using batch norm
-              bottleneck=True):
+              bottleneck=True,
+              freeze_bn=False):
 
     # assume x is rgb, not scaled, mean subtracted
     x = x * 1.0
@@ -68,6 +67,7 @@ def inference(x, is_training,
 
     c = Config()
     c['bottleneck'] = bottleneck
+    c['freeze_bn'] = freeze_bn
     # print("inferece bottleneck: {}".format(c['bottleneck']))
     c['is_training'] = tf.convert_to_tensor(is_training,
                                             dtype='bool',
@@ -200,34 +200,55 @@ def bn(x, c):
 
     axis = list(range(len(x_shape) - 1))
 
-    beta = _get_variable('beta',
+    if c['freeze_bn']:
+        beta = _get_variable(
+            'beta', params_shape, 
+            initializer=tf.zeros_initializer,
+            trainable=False)
+        gamma = _get_variable(
+            'gamma',  params_shape, 
+            initializer=tf.ones_initializer,
+            trainable=False)
+
+        moving_mean = _get_variable(
+            'moving_mean', params_shape, 
+            initializer=tf.zeros_initializer, 
+            trainable=False)
+        moving_variance = _get_variable(
+            'moving_variance', params_shape, 
+            initializer=tf.ones_initializer, 
+            trainable=False)
+        tf.add_to_collection(UPDATE_OPS_COLLECTION, tf.no_op())
+        mean, variance = moving_mean, moving_variance
+    else:
+        beta = _get_variable('beta',
                          params_shape,
                          initializer=tf.zeros_initializer)
-    gamma = _get_variable('gamma',
+        gamma = _get_variable('gamma',
                           params_shape,
                           initializer=tf.ones_initializer)
 
-    moving_mean = _get_variable('moving_mean',
+        moving_mean = _get_variable('moving_mean',
                                 params_shape,
                                 initializer=tf.zeros_initializer,
                                 trainable=False)
-    moving_variance = _get_variable('moving_variance',
+        moving_variance = _get_variable('moving_variance',
                                     params_shape,
                                     initializer=tf.ones_initializer,
                                     trainable=False)
 
-    # These ops will only be preformed when training.
-    mean, variance = tf.nn.moments(x, axis)
-    update_moving_mean = moving_averages.assign_moving_average(moving_mean,
-                                                               mean, BN_DECAY)
-    update_moving_variance = moving_averages.assign_moving_average(
-        moving_variance, variance, BN_DECAY)
-    tf.add_to_collection(UPDATE_OPS_COLLECTION, update_moving_mean)
-    tf.add_to_collection(UPDATE_OPS_COLLECTION, update_moving_variance)
+        # These ops will only be preformed when training.
+        mean, variance = tf.nn.moments(x, axis)
+        update_moving_mean = moving_averages.assign_moving_average(
+            moving_mean, mean, BN_DECAY)
+        update_moving_variance = moving_averages.assign_moving_average(
+            moving_variance, variance, BN_DECAY)
+        tf.add_to_collection(UPDATE_OPS_COLLECTION, update_moving_mean)
+        tf.add_to_collection(UPDATE_OPS_COLLECTION, update_moving_variance)
 
-    mean, variance = control_flow_ops.cond(
-        c['is_training'], lambda: (mean, variance),
-        lambda: (moving_mean, moving_variance))
+        mean, variance = control_flow_ops.cond(c['is_training'], 
+            lambda: (mean, variance),
+            lambda: (moving_mean, moving_variance))
 
     x = tf.nn.batch_normalization(x, mean, variance, beta, gamma, BN_EPSILON)
     # x.set_shape(inputs.get_shape()) ??
@@ -353,9 +374,6 @@ def main():
         Remember check the preprocessing.
     """
 
-    # resnet version
-    layer = 50
-
     with tf.Graph().as_default() as g:
         is_training = tf.placeholder(tf.bool, [], "is_training")
 
@@ -389,9 +407,9 @@ def main():
             if os.path.exists(pretrained_model_path):
                 # Restores from checkpoint
                 saver.restore(sess, pretrained_model_path)
-                # print("variables in checkpoint file {}".format(pretrained_model_path))
-                # utils.print_tensors_in_checkpoint_file(
-                #     file_name=pretrained_model_path, tensor_name=None, all_tensors=True)
+                print("variables in checkpoint file {}".format(pretrained_model_path))
+                utils.print_tensors_in_checkpoint_file(
+                    file_name=pretrained_model_path, tensor_name=None, all_tensors=True)
             else:
                 raise ValueError(
                     "Cannot find pretrained model: {}".format(pretrained_model_path))

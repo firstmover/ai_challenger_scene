@@ -3,19 +3,6 @@
 
     use random crop and random scale, 10crop eval.
     momentum-sgd
-
-    experiment results:
-    1.	resnet50 train from scratch: 
-    	0.86(top3) 0.89(top3 10crop moving average)
-    2.  resnet50 train fc:
-    	0.88(top3) 0.90(top3 10crop moving average)
-    3.	resnet50 finetune:
-    	0.91(top3) 0.9427 (top3 10crop moving average)
-    4.	resnet101 finetune:
-    	overfit, 13epoch 0.9108, 35epoch 0.8757. need monitor.
-    	0.9178 ~ 0.9187 converge. 0.9225(65 epoch)
-    	(top1)0.8088 (top3)0.9413
-
 """
 
 from __future__ import absolute_import
@@ -31,50 +18,52 @@ import tensorflow as tf
 import numpy as np
 import math
 
-import scene_input
-# import scene_vgg as vgg
-import scene_resnet as resnet
 import utility_tensorflow as utils
 import tqdm
 
-root = "/scratch/lyc/ai_challenger_scene/"
+import scene_config as c
 
-data_dir = os.path.join(root, "data")
-log_dir = os.path.join(root, "tmp/log")
-checkpoint_dir = os.path.join(root, "tmp/checkpoint")
-model_dir = os.path.join(root, "model")
+root = c.root
 
-# dropout_keep_prob = 0.5
-batch_size = 32
+data_dir = c.data_dir
+tmp_dir = c.tmp_dir
+log_dir = c.log_dir
+checkpoint_dir = c.checkpoint_dir
+model_dir = c.model_dir
+acc_loss_path = c.acc_loss_path
 
-num_epochs = 70 # 1000
+# dropout_keep_prob = c.dropout_keep_prob
+batch_size = c.batch_size
+
+num_epochs = c.num_epochs
 
 # Constants describing the training process.
-MOVING_AVERAGE_DECAY = 0.9999  # The decay to use for the moving average.
+MOVING_AVERAGE_DECAY = c.MOVING_AVERAGE_DECAY  # The decay to use for the moving average.
 
 # learning rate decay constant
-NUM_EPOCHS_PER_DECAY = 30 # 350.0  # Epochs after which learning rate decays.
-LEARNING_RATE_DECAY_FACTOR = 0.1  # Learning rate decay factor.
+NUM_EPOCHS_PER_DECAY = c.NUM_EPOCHS_PER_DECAY  # Epochs after which learning rate decays.
+LEARNING_RATE_DECAY_FACTOR = c.LEARNING_RATE_DECAY_FACTOR  # Learning rate decay factor.
 
 # momentum SGD optimizer
-initial_learning_rate_mSGD = 0.001
-momentum = 0.9
+initial_learning_rate_mSGD = c.initial_learning_rate_mSGD
+momentum = c.momentum
 
-num_examples_per_epoch_for_train = scene_input.num_examples_per_epoch_for_train
-num_examples_per_epoch_for_val = scene_input.num_examples_per_epoch_for_val
+num_examples_per_epoch_for_train = c.num_examples_per_epoch_for_train
+num_examples_per_epoch_for_val = c.num_examples_per_epoch_for_val
 steps_per_epoch = int(math.ceil(num_examples_per_epoch_for_train / float(batch_size)))
-# steps_per_epoch = np.ceil(np.array([num_examples_per_epoch_for_train / float(batch_size)]), dtype='int')[0]
-# steps_per_epoch = int(num_examples_per_epoch_for_train / batch_size) + 1
 
 # write tensorboard info every freq steps
-tensorboard_write_frq = 20
+tensorboard_write_frq = c.tensorboard_write_frq
 
 # checkpoint every freq epoch
-checkpoint_freq = 3
+checkpoint_freq = c.checkpoint_freq
 
-use_minimal_summary = True
+use_minimal_summary = c.use_minimal_summary
 
 # bn updata op name, must be grouped with training op
+resnet_layer = c.resnet_layer
+
+import scene_resnet as resnet
 UPDATE_OPS_COLLECTION = resnet.UPDATE_OPS_COLLECTION
 
 
@@ -108,8 +97,6 @@ def check_val(sess, correct_prediction, is_training,
     # Initialize the correct dataset
     sess.run(dataset_init_op)
     num_correct, num_correct_top3, num_samples = 0, 0, 0
-    # num_steps_per_epoch = int(num_examples_per_epoch_for_val / batch_size) + 1
-    # num_steps_per_epoch = np.ceil(np.array([num_examples_per_epoch_for_val / float(batch_size)]), dtype='int')[0]
     num_steps_per_epoch = int(math.ceil(num_examples_per_epoch_for_val / float(batch_size)))
     for i in tqdm.tqdm(range(num_steps_per_epoch)):
         try:
@@ -215,8 +202,8 @@ def train_resnet_fc(total_loss, global_step):
     with tf.control_dependencies([loss_averages_op]):
         opt = tf.train.MomentumOptimizer(lr, momentum)
         grads = opt.compute_gradients(
-        	total_loss, 
-        	var_list=tf.get_collection(resnet.RESNET_FC_VARIABLES))
+            total_loss, 
+            var_list=tf.get_collection(resnet.RESNET_FC_VARIABLES))
 
     # Apply gradients.
     apply_gradient_op = opt.apply_gradients(grads, global_step=global_step)
@@ -235,7 +222,7 @@ def train_resnet_fc(total_loss, global_step):
     variable_averages = tf.train.ExponentialMovingAverage(
         MOVING_AVERAGE_DECAY, global_step)
     variables_averages_op = variable_averages.apply(
-    	tf.get_collection(resnet.RESNET_FC_VARIABLES))
+        tf.get_collection(resnet.RESNET_FC_VARIABLES))
 
     batchnorm_updates = tf.get_collection(UPDATE_OPS_COLLECTION)
     batchnorm_updates_op = tf.group(*batchnorm_updates)
@@ -247,12 +234,21 @@ def train_resnet_fc(total_loss, global_step):
     return train_op
 
 
-def inference_resnet(images, is_training):
+def inference_resnet(images, is_training, layer, freeze_bn=False):
+    if layer == 50:
+        num_blocks = [3, 4, 6, 3]
+    elif layer == 101:
+        num_blocks = [3, 4, 23, 3]
+    elif layer == 152:
+        num_blocks = [3, 8, 36, 3]
+    else:
+        raise ValueError("Invalid resnet layer number.")
     return resnet.inference(images,
-                            num_classes=scene_input.num_classes,
+                            num_classes=c.num_classes,
                             is_training=is_training,
                             bottleneck=True,
-                            num_blocks=[3, 4, 6, 3])
+                            num_blocks=num_blocks,
+                            freeze_bn=freeze_bn)
 
 
 def loss_resnet(logits, labels):
@@ -272,8 +268,6 @@ def main_resnet():
     # Get the list of filenames and corresponding list of labels for training et validation
     train_filenames, train_labels = scene_input.list_images('train')
     val_filenames, val_labels = scene_input.list_images('validation')
-
-    resnet_layer = 50
 
     # --------------------------------------------------------------------------
     # In TensorFlow, you first want to define the computation graph with all the
@@ -314,7 +308,7 @@ def main_resnet():
 
         merged_summary = tf.summary.merge_all()
 
-        saver = tf.train.Saver(tf.global_variables())
+        saver = tf.train.Saver(tf.global_variables(), max_to_keep=100)
 
         # tf.get_default_graph().finalize()
 
@@ -334,16 +328,16 @@ def main_resnet():
         pretrained_model_saver = tf.train.Saver(variables_to_restore)
         pretrained_model_path = os.path.join(model_dir, resnet.checkpoint_fn(resnet_layer))
         if os.path.exists(pretrained_model_path):
-        	print("load pretrained model.")
-        	pretrained_model_saver.restore(sess, pretrained_model_path)
+            print("load pretrained model.")
+            pretrained_model_saver.restore(sess, pretrained_model_path)
         else:
             raise ValueError(
-            	"Cannot find pretrained model: {}".format(pretrained_model_path))
+                "Cannot find pretrained model: {}".format(pretrained_model_path))
 
         # check model_dir for checkpoint file.
         restore_epoch = None
         ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
-        if ckpt and ckpt.model_checkpoint_path:
+        if restore_epoch == None and ckpt and ckpt.model_checkpoint_path:
             # Restores from checkpoint
             saver.restore(sess, ckpt.model_checkpoint_path)
             # Assuming model_checkpoint_path looks something like:
@@ -354,41 +348,48 @@ def main_resnet():
             sess.run(global_step.assign((restore_epoch - 1) * steps_per_epoch))
             print("restore check point from: {}".format(ckpt.model_checkpoint_path))
             print("get epoch: {} step: {}".format(restore_epoch, (restore_epoch - 1) * steps_per_epoch))
+        elif restore_epoch != None:
+            raise NotImplementedError
         else:
             print('No checkpoint found.')
 
         # Train the entire model for a few more epochs, continuing with the *same* weights.
         start_time = time.time()
-        for epoch in range(num_epochs):
-            if restore_epoch is not None and epoch < restore_epoch:
-                continue
-            else:
-                print('epoch {} / {}'.format(epoch + 1, num_epochs))
-            tick = time.time()
-            sess.run(train_data_init_op)
-            for i in tqdm.tqdm(range(steps_per_epoch)):
-                try:
-                    if tensorboard_write_frq > 0 and i % tensorboard_write_frq == 0:
-                        _, summary = sess.run([full_train_op, merged_summary], {is_training: True})
-                        writer.add_summary(summary, epoch * steps_per_epoch + i)
-                    else:
-                        _ = sess.run(full_train_op, {is_training: True})
-                except tf.errors.OutOfRangeError:
-                    break
-            tock = time.time()
-            print(check_time(tock - start_time, steps_per_epoch, tock - tick))
+        print("writing acc&loss info to {}".format(acc_loss_path))
+        with open(acc_loss_path, "w") as f:
+            f.write("sampled train acc, sampled train loss, val acc top1, val acc top3\n")
+            for epoch in range(num_epochs):
+                if restore_epoch is not None and epoch < restore_epoch:
+                    continue
+                else:
+                    print('epoch {} / {}'.format(epoch + 1, num_epochs))
+                tick = time.time()
+                sess.run(train_data_init_op)
+                for i in tqdm.tqdm(range(steps_per_epoch)):
+                    try:
+                        if tensorboard_write_frq > 0 and i % tensorboard_write_frq == 0:
+                            _, summary = sess.run([full_train_op, merged_summary], {is_training: True})
+                            writer.add_summary(summary, epoch * steps_per_epoch + i)
+                        else:
+                            _ = sess.run(full_train_op, {is_training: True})
+                    except tf.errors.OutOfRangeError:
+                        break
+                tock = time.time()
+                # print(check_time(tock - start_time, steps_per_epoch, tock - tick))
 
-            # check point
-            if (epoch + 1) % checkpoint_freq == 0:
-                saver.save(sess, os.path.join(checkpoint_dir, 'scene'), global_step=epoch + 1)
+                # check point
+                if (epoch + 1) % checkpoint_freq == 0:
+                    saver.save(sess, os.path.join(checkpoint_dir, 'scene'), global_step=epoch + 1)
 
-            # Check on the train and val sets every epoch.
-            train_acc, train_loss = check_train(sess, correct_prediction, is_training,
-                                                train_data_init_op, n_batch=int(5000/batch_size), loss=loss_)
-            print('Train: accuracy {0:.4f} loss {1:.4f}'.format(train_acc, train_loss))
-            val_acc, val_acc_top3 = check_val(sess, correct_prediction, is_training, val_data_init_op,
-                                              correct_prediction_top3=correct_prediction_top3)
-            print('Val: accuracy (top1){0:.4f} (top3){1:.4f}'.format(val_acc, val_acc_top3))
+                # Check on the train and val sets every epoch.
+                train_acc, train_loss = check_train(sess, correct_prediction, is_training,
+                                                    train_data_init_op, n_batch=int(5000/batch_size), loss=loss_)
+                print('Train: accuracy {0:.4f} loss {1:.4f}'.format(train_acc, train_loss))
+                val_acc, val_acc_top3 = check_val(sess, correct_prediction, is_training, val_data_init_op,
+                                                  correct_prediction_top3=correct_prediction_top3)
+                print('Val: accuracy (top1){0:.4f} (top3){1:.4f}'.format(val_acc, val_acc_top3))
+                f.write("{0:.4f} {1:.4f} {2:.4f} {3:.4f}\n".format(
+                    train_acc, train_loss, val_acc, val_acc_top3))
 
 
 if __name__ == '__main__':

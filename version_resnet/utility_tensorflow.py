@@ -29,7 +29,7 @@ def add_activation_summary(x):
     if x is not None:
         tf.summary.histogram(tensor_name + '/activations', x)
         tf.summary.scalar(tensor_name + '/sparsity',
-                          tf.nn.zero_fraction(x))
+                            tf.nn.zero_fraction(x))
 
 
 def add_loss_summaries(total_loss):
@@ -65,45 +65,45 @@ def add_gradient_summary(grad, var):
 
 
 def print_tensors_in_checkpoint_file(file_name, tensor_name, all_tensors, value=False):
-  """ Modified version of tensorflow.python.tools inspect_checkpoint
+    """ Modified version of tensorflow.python.tools inspect_checkpoint
     Prints tensors (names) in a checkpoint file.
-  If no `tensor_name` is provided, prints the tensor names and shapes
-  in the checkpoint file.
-  If `tensor_name` is provided, prints the content of the tensor.
-  Args:
+    If no `tensor_name` is provided, prints the tensor names and shapes
+    in the checkpoint file.
+    If `tensor_name` is provided, prints the content of the tensor.
+    Args:
     file_name: Name of the checkpoint file.
     tensor_name: Name of the tensor in the checkpoint file to print.
     all_tensors: Boolean indicating whether to print all tensors.
     value: Boolean, True to print values in the tensor.
-  """
-  try:
-    reader = pywrap_tensorflow.NewCheckpointReader(file_name)
-    if all_tensors:
-      var_to_shape_map = reader.get_variable_to_shape_map()
-      print("get tensor number: {}".format(len(var_to_shape_map)))
-      for key in sorted(var_to_shape_map):
-        print(key)
-        tensor = reader.get_tensor(key)
-        # print("type(tensor): {}".format(type(tensor)))
-        # print("tensor.shape: {}".format(tensor.shape))
-        if value:
-          print(tensor)
-    elif not tensor_name:
-      print(reader.debug_string().decode("utf-8"))
-    else:
-      print("tensor_name: ", tensor_name)
-      if value:
-        print(reader.get_tensor(tensor_name))
-  except Exception as e:  # pylint: disable=broad-except
-    print(str(e))
-    if "corrupted compressed block contents" in str(e):
-      print("It's likely that your checkpoint file has been compressed "
-            "with SNAPPY.")
-    if ("Data loss" in str(e) and
-        (any([e in file_name for e in [".index", ".meta", ".data"]]))):
-      proposed_file = ".".join(file_name.split(".")[0:-1])
-      v2_file_error_template = """
-It's likely that this is a V2 checkpoint and you need to provide the filename
-*prefix*.  Try removing the '.' and extension.  Try:
-inspect checkpoint --file_name = {}"""
-      print(v2_file_error_template.format(proposed_file))
+    """
+    try:
+        reader = pywrap_tensorflow.NewCheckpointReader(file_name)
+        if all_tensors:
+            var_to_shape_map = reader.get_variable_to_shape_map()
+            print("get tensor number: {}".format(len(var_to_shape_map)))
+            for key in sorted(var_to_shape_map):
+                print(key)
+                tensor = reader.get_tensor(key)
+                # print("type(tensor): {}".format(type(tensor)))
+                # print("tensor.shape: {}".format(tensor.shape))
+                if value:
+                    print(tensor)
+        elif not tensor_name:
+            print(reader.debug_string().decode("utf-8"))
+        else:
+            print("tensor_name: ", tensor_name)
+            if value:
+                print(reader.get_tensor(tensor_name))
+    except Exception as e:  # pylint: disable=broad-except
+        print(str(e))
+        if "corrupted compressed block contents" in str(e):
+            print("It's likely that your checkpoint file has been compressed "
+                "with SNAPPY.")
+        if ("Data loss" in str(e) and
+            (any([e in file_name for e in [".index", ".meta", ".data"]]))):
+            proposed_file = ".".join(file_name.split(".")[0:-1])
+            v2_file_error_template = """
+            It's likely that this is a V2 checkpoint and you need to provide the filename
+            *prefix*.  Try removing the '.' and extension.  Try:
+            inspect checkpoint --file_name = {}"""
+            print(v2_file_error_template.format(proposed_file))
