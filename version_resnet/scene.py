@@ -32,7 +32,6 @@ checkpoint_dir = c.checkpoint_dir
 model_dir = c.model_dir
 acc_loss_path = c.acc_loss_path
 
-# dropout_keep_prob = c.dropout_keep_prob
 batch_size = c.batch_size
 
 num_epochs = c.num_epochs
@@ -63,11 +62,16 @@ use_minimal_summary = c.use_minimal_summary
 # bn updata op name, must be grouped with training op
 resnet_layer = c.resnet_layer
 
+keep_prob = c.dropout_keep_prob
+
 import scene_resnet as resnet
 UPDATE_OPS_COLLECTION = resnet.UPDATE_OPS_COLLECTION
 
+import scene_input
 
-def check_train(sess, correct_prediction, is_training, dataset_init_op, n_batch, loss):
+
+def check_train(sess, correct_prediction, is_training, dataset_init_op, 
+    n_batch, loss, dropout_keep_prob):
     """
     sampled accuracy and loss for training set.
     """
@@ -76,7 +80,8 @@ def check_train(sess, correct_prediction, is_training, dataset_init_op, n_batch,
     num_correct, num_samples, sum_loss = 0, 0, 0
     for _ in tqdm.tqdm(range(n_batch)):
         try:
-            corr_pred, l = sess.run([correct_prediction, loss], {is_training: False})
+            feed_dict = {is_training: False, dropout_keep_prob: 1.0}
+            corr_pred, l = sess.run([correct_prediction, loss], feed_dict)
             num_correct += corr_pred.sum()
             num_samples += corr_pred.shape[0]
             sum_loss += l
@@ -89,8 +94,8 @@ def check_train(sess, correct_prediction, is_training, dataset_init_op, n_batch,
     return acc, sum_loss
 
 
-def check_val(sess, correct_prediction, is_training,
-                       dataset_init_op, correct_prediction_top3):
+def check_val(sess, correct_prediction, is_training, dataset_init_op, 
+    correct_prediction_top3, dropout_keep_prob):
     """
     Check the accuracy(top1 and top3) of the model on val.
     """
@@ -100,8 +105,9 @@ def check_val(sess, correct_prediction, is_training,
     num_steps_per_epoch = int(math.ceil(num_examples_per_epoch_for_val / float(batch_size)))
     for i in tqdm.tqdm(range(num_steps_per_epoch)):
         try:
+            feed_dict = {is_training: False, dropout_keep_prob:1.0}
             correct_pred, correct_pred_top3 = sess.run(
-                [correct_prediction, correct_prediction_top3], {is_training: False})
+                [correct_prediction, correct_prediction_top3], feed_dict)
             num_correct += correct_pred.sum()
             num_correct_top3 += correct_pred_top3.sum()
             num_samples += correct_pred.shape[0]
@@ -168,7 +174,10 @@ def train_resnet(total_loss, global_step):
     # Track the moving averages of all trainable variables.
     variable_averages = tf.train.ExponentialMovingAverage(
         MOVING_AVERAGE_DECAY, global_step)
-    variables_averages_op = variable_averages.apply(tf.trainable_variables())
+    if c.use_moving_average:
+        variables_averages_op = variable_averages.apply(tf.trainable_variables())
+    else:
+        variables_averages_op = tf.no_op()
 
     batchnorm_updates = tf.get_collection(UPDATE_OPS_COLLECTION)
     batchnorm_updates_op = tf.group(*batchnorm_updates)
@@ -181,6 +190,7 @@ def train_resnet(total_loss, global_step):
 
 
 def train_resnet_fc(total_loss, global_step):
+    raise NotImplementedError("dropout, freeze bn not, etc. Need modifying.")
     """ momentum sgd with lr exponentially decay """
 
     # Variables that affect learning rate.
@@ -234,7 +244,7 @@ def train_resnet_fc(total_loss, global_step):
     return train_op
 
 
-def inference_resnet(images, is_training, layer, freeze_bn=False):
+def inference_resnet(images, is_training, layer, dropout_keep_prob, freeze_bn=False):
     if layer == 50:
         num_blocks = [3, 4, 6, 3]
     elif layer == 101:
@@ -248,7 +258,8 @@ def inference_resnet(images, is_training, layer, freeze_bn=False):
                             is_training=is_training,
                             bottleneck=True,
                             num_blocks=num_blocks,
-                            freeze_bn=freeze_bn)
+                            freeze_bn=freeze_bn,
+                            dropout_keep_prob=dropout_keep_prob)
 
 
 def loss_resnet(logits, labels):
@@ -278,6 +289,7 @@ def main_resnet():
         global_step = tf.contrib.framework.get_or_create_global_step()
 
         is_training = tf.placeholder(tf.bool, [], "is_training")
+        dropout_keep_prob = tf.placeholder(tf.float32, [], "dropout_keep_prob")
 
         images, labels, train_data_init_op, val_data_init_op \
             = scene_input.get_dataset_with_random_scale(train_filenames, train_labels,
@@ -287,7 +299,8 @@ def main_resnet():
             tf.image_summary('images', images)
 
         with tf.name_scope('inference'):
-            logits= inference_resnet(images, is_training)
+            logits= inference_resnet(
+                images, is_training, resnet_layer, dropout_keep_prob)
 
         with tf.name_scope('loss'):
             loss_ = loss_resnet(logits, labels)
@@ -316,7 +329,8 @@ def main_resnet():
     # Now that we have built the graph and finalized it, we define the session.
     # The session is the interface to *run* the computational graph.
     # We can call our training operations with `sess.run(train_op)` for instance
-    with tf.Session(graph=graph) as sess:
+    print("writing acc&loss info to {}".format(acc_loss_path))
+    with tf.Session(graph=graph) as sess, open(acc_loss_path, "w") as f:
         sess.run(init_var_op)
 
         # tensorboard writer.
@@ -328,68 +342,71 @@ def main_resnet():
         pretrained_model_saver = tf.train.Saver(variables_to_restore)
         pretrained_model_path = os.path.join(model_dir, resnet.checkpoint_fn(resnet_layer))
         if os.path.exists(pretrained_model_path):
-            print("load pretrained model.")
+            print("Loading pretrained model from :{}".format(pretrained_model_path))
             pretrained_model_saver.restore(sess, pretrained_model_path)
         else:
             raise ValueError(
                 "Cannot find pretrained model: {}".format(pretrained_model_path))
 
         # check model_dir for checkpoint file.
-        restore_epoch = None
+        restore_epoch = 13 # designate a specific epoch to restore or None.
         ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
         if restore_epoch == None and ckpt and ckpt.model_checkpoint_path:
             # Restores from checkpoint
             saver.restore(sess, ckpt.model_checkpoint_path)
-            # Assuming model_checkpoint_path looks something like:
-            #   /my-favorite-path/model/model-10.xxx,
-            # extract epoch from it.
-            restore_epoch = ckpt.model_checkpoint_path.split('/')[-1].split('-')[1]
-            restore_epoch = int(restore_epoch)
-            sess.run(global_step.assign((restore_epoch - 1) * steps_per_epoch))
+            restore_epoch = int(ckpt.model_checkpoint_path.split('/')[-1].split('-')[1])
+            restore_step = (restore_epoch - 1) * steps_per_epoch
+            sess.run(global_step.assign(restore_step))
             print("restore check point from: {}".format(ckpt.model_checkpoint_path))
-            print("get epoch: {} step: {}".format(restore_epoch, (restore_epoch - 1) * steps_per_epoch))
+            print("get epoch: {} step: {}".format(restore_epoch, restore_step))
         elif restore_epoch != None:
-            raise NotImplementedError
+            restore_model_path = os.path.join(checkpoint_dir, "scene-{}".format(restore_epoch))
+            saver.restore(sess, restore_model_path)
+            restore_step = (restore_epoch - 1) * steps_per_epoch
+            sess.run(global_step.assign(restore_step))
+            print("restore check point from: {}".format(restore_model_path))
+            print("get epoch: {} step: {}".format(restore_epoch, restore_step))    
         else:
             print('No checkpoint found.')
 
         # Train the entire model for a few more epochs, continuing with the *same* weights.
         start_time = time.time()
-        print("writing acc&loss info to {}".format(acc_loss_path))
-        with open(acc_loss_path, "w") as f:
-            f.write("sampled train acc, sampled train loss, val acc top1, val acc top3\n")
-            for epoch in range(num_epochs):
-                if restore_epoch is not None and epoch < restore_epoch:
-                    continue
-                else:
-                    print('epoch {} / {}'.format(epoch + 1, num_epochs))
-                tick = time.time()
-                sess.run(train_data_init_op)
-                for i in tqdm.tqdm(range(steps_per_epoch)):
-                    try:
-                        if tensorboard_write_frq > 0 and i % tensorboard_write_frq == 0:
-                            _, summary = sess.run([full_train_op, merged_summary], {is_training: True})
-                            writer.add_summary(summary, epoch * steps_per_epoch + i)
-                        else:
-                            _ = sess.run(full_train_op, {is_training: True})
-                    except tf.errors.OutOfRangeError:
-                        break
-                tock = time.time()
-                # print(check_time(tock - start_time, steps_per_epoch, tock - tick))
+        
+        f.write("sampled train acc, sampled train loss, val acc top1, val acc top3\n")
+        for epoch in range(num_epochs):
+            if restore_epoch is not None and epoch < restore_epoch:
+                continue
+            else:
+                print('epoch {} / {}'.format(epoch + 1, num_epochs))
+            tick = time.time()
+            sess.run(train_data_init_op)
+            for i in tqdm.tqdm(range(steps_per_epoch)):
+                try:
+                    if tensorboard_write_frq > 0 and i % tensorboard_write_frq == 0:
+                        feed_dict = {is_training: True, dropout_keep_prob: keep_prob}
+                        _, summary = sess.run([full_train_op, merged_summary], feed_dict)
+                        writer.add_summary(summary, epoch * steps_per_epoch + i)
+                    else:
+                        feed_dict = {is_training: True, dropout_keep_prob: keep_prob}
+                        _ = sess.run(full_train_op, feed_dict)
+                except tf.errors.OutOfRangeError:
+                    break
+            tock = time.time()
+            # print(check_time(tock - start_time, steps_per_epoch, tock - tick))
 
-                # check point
-                if (epoch + 1) % checkpoint_freq == 0:
-                    saver.save(sess, os.path.join(checkpoint_dir, 'scene'), global_step=epoch + 1)
+            # check point
+            if (epoch + 1) % checkpoint_freq == 0:
+                saver.save(sess, os.path.join(checkpoint_dir, 'scene'), global_step=epoch + 1)
 
-                # Check on the train and val sets every epoch.
-                train_acc, train_loss = check_train(sess, correct_prediction, is_training,
-                                                    train_data_init_op, n_batch=int(5000/batch_size), loss=loss_)
-                print('Train: accuracy {0:.4f} loss {1:.4f}'.format(train_acc, train_loss))
-                val_acc, val_acc_top3 = check_val(sess, correct_prediction, is_training, val_data_init_op,
-                                                  correct_prediction_top3=correct_prediction_top3)
-                print('Val: accuracy (top1){0:.4f} (top3){1:.4f}'.format(val_acc, val_acc_top3))
-                f.write("{0:.4f} {1:.4f} {2:.4f} {3:.4f}\n".format(
-                    train_acc, train_loss, val_acc, val_acc_top3))
+            # Check on the train and val sets every epoch.
+            train_acc, train_loss = check_train(sess, correct_prediction, is_training, train_data_init_op, 
+                dropout_keep_prob=dropout_keep_prob, n_batch=int(5000/batch_size), loss=loss_)
+            print('Train: accuracy {0:.4f} loss {1:.4f}'.format(train_acc, train_loss))
+            val_acc, val_acc_top3 = check_val(sess, correct_prediction, is_training, val_data_init_op, 
+                dropout_keep_prob=dropout_keep_prob, correct_prediction_top3=correct_prediction_top3)
+            print('Val: accuracy (top1){0:.4f} (top3){1:.4f}'.format(val_acc, val_acc_top3))
+            f.write("{epoch} {0:.4f} {1:.4f} {2:.4f} {3:.4f}\n".format(
+                train_acc, train_loss, val_acc, val_acc_top3, epoch=epoch + 1))
 
 
 if __name__ == '__main__':

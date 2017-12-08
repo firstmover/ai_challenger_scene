@@ -31,7 +31,7 @@ test_filename = c.test_filename
 
 num_workers = c.num_workers
 
-rotate_angle = c.rotate_angle
+rotate_angle = c.random_rotate_range
 
 num_classes = c.num_classes
 num_examples_per_epoch_for_train = c.num_examples_per_epoch_for_train
@@ -40,6 +40,8 @@ num_examples_per_epoch_for_test_1 = c.num_examples_per_epoch_for_test_1
 
 IMAGENET_MEAN_RGB = [123.151630838, 115.902882574, 103.062623801]
 # vgg_mean = [123.68, 116.78, 103.94]
+
+input_size = c.input_size
 
 
 def list_images(data_set_type):
@@ -86,21 +88,28 @@ def list_images_test():
     return image_paths
 
 
+def list_images_testb():
+    test_file_path = os.path.join(data_dir, c.testb_filename)
+    print("Get image names in dir: {}".format(test_file_path))
+    image_names = os.listdir(test_file_path)
+    image_paths = []
+    for name in image_names:
+        image_paths.append(os.path.join(test_file_path, name))
+    return image_paths
+
+
 def _parse_function(filename, label):
     image_string = tf.read_file(filename)
     image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
     image = tf.cast(image_decoded, tf.float32)
 
-    smallest_side = 256.0
-    height, width = tf.shape(image)[0], tf.shape(image)[1]
-    height = tf.to_float(height)
-    width = tf.to_float(width)
+    smallest_side = input_size * 256.0 / 224
+    height, width = tf.to_float(tf.shape(image)[0]), tf.to_float(tf.shape(image)[1])
 
     scale = tf.cond(tf.greater(height, width),
                     lambda: smallest_side / width,
                     lambda: smallest_side / height)
-    new_height = tf.to_int32(height * scale)
-    new_width = tf.to_int32(width * scale)
+    new_height, new_width = tf.to_int32(height * scale), tf.to_int32(width * scale)
 
     resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
     return resized_image, label
@@ -111,25 +120,32 @@ def _parse_function_with_random_scale(filename, label):
     image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
     image = tf.cast(image_decoded, tf.float32)
 
-    # get random side from [256, 480]
-    smallest_side = 256 + (480 - 256) * random_ops.random_uniform([1], 0, 1)[0]
-    height, width = tf.shape(image)[0], tf.shape(image)[1]
-    height = tf.to_float(height)
-    width = tf.to_float(width)
+    # get random side from [256, 480].
+    # if input_size > 256, set lower bound to input_size
+    # use [256, 320], performance decrease, setting see result.txt
+    # resize_range = [256, 480]
+    resize_range = [c.random_scale_lower, c.random_scale_upper]
+    if resize_range[0] < input_size:
+        resize_range[0] = input_size
+    if resize_range[1] < resize_range[0]:
+        raise ValueError("Wrong random scale range.")
+    smallest_side = resize_range[0] + \
+        (resize_range[1] - resize_range[0]) * random_ops.random_uniform([1], 0, 1)[0]
+    height, width = tf.to_float(tf.shape(image)[0]), tf.to_float(tf.shape(image)[1])
 
     scale = tf.cond(tf.greater(height, width),
                     lambda: smallest_side / width,
                     lambda: smallest_side / height)
-    new_height = tf.to_int32(height * scale)
-    new_width = tf.to_int32(width * scale)
+    new_height, new_width = tf.to_int32(height * scale), tf.to_int32(width * scale)
 
     resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
     return resized_image, label
 
 
-def get_dataset_with_random_scale(train_filenames, train_labels, val_filenames, val_labels, batch_size):
+def get_dataset_with_random_scale(
+    train_filenames, train_labels, val_filenames, val_labels, batch_size):
     def training_preprocess(image, label):
-        crop_image = tf.random_crop(image, [224, 224, 3])
+        crop_image = tf.random_crop(image, [input_size, input_size, 3])
         flip_image = tf.image.random_flip_left_right(crop_image)
 
         means = tf.reshape(tf.constant(IMAGENET_MEAN_RGB), [1, 1, 3])
@@ -138,7 +154,7 @@ def get_dataset_with_random_scale(train_filenames, train_labels, val_filenames, 
         return centered_image, label
 
     def val_preprocess(image, label):
-        crop_image = tf.image.resize_image_with_crop_or_pad(image, 224, 224)
+        crop_image = tf.image.resize_image_with_crop_or_pad(image, input_size, input_size)
 
         means = tf.reshape(tf.constant(IMAGENET_MEAN_RGB), [1, 1, 3])
         centered_image = crop_image - means
@@ -146,8 +162,7 @@ def get_dataset_with_random_scale(train_filenames, train_labels, val_filenames, 
         return centered_image, label
 
     # Training dataset
-    train_filenames = tf.constant(train_filenames)
-    train_labels = tf.constant(train_labels)
+    train_filenames, train_labels = tf.constant(train_filenames), tf.constant(train_labels)
     train_dataset = tf.contrib.data.Dataset.from_tensor_slices((train_filenames, train_labels))
     train_dataset = train_dataset.map(_parse_function_with_random_scale,
                                       num_threads=num_workers, output_buffer_size=batch_size)
@@ -157,8 +172,7 @@ def get_dataset_with_random_scale(train_filenames, train_labels, val_filenames, 
     batched_train_dataset = train_dataset.batch(batch_size)
 
     # Validation dataset
-    val_filenames = tf.constant(val_filenames)
-    val_labels = tf.constant(val_labels)
+    val_filenames, val_labels = tf.constant(val_filenames), tf.constant(val_labels)
     val_dataset = tf.contrib.data.Dataset.from_tensor_slices((val_filenames, val_labels))
     val_dataset = val_dataset.map(_parse_function,
                                   num_threads=num_workers, output_buffer_size=batch_size)
@@ -184,48 +198,70 @@ def image_crop(batched_image, offset, side):
     return tf.reshape(patch, [side, side, 3])
 
 
-def crop5(image, height, width):
-        batched_image = tf.reshape(image, [-1, height, width, 3])
+def crop5(image, height, width, side):
+    batched_image = tf.reshape(image, [-1, height, width, 3])
 
-        half_height, half_width = tf.to_int32(height / 2), tf.to_int32(width / 2)
-        mid = image_crop(batched_image, [half_height, half_width], 224)
-        l_u = image_crop(batched_image, [112, 112], 224)
-        l_d = image_crop(batched_image, [height - 112, 112], 224)
-        r_u = image_crop(batched_image, [112, width - 112], 224)
-        r_d = image_crop(batched_image, [height - 112, width - 112], 224)
+    half_height, half_width = tf.to_int32(height / 2), tf.to_int32(width / 2)
+    half_side = int(side / 2)
+    mid = image_crop(batched_image, [half_height, half_width], side)
+    l_u = image_crop(batched_image, [half_side, half_side], side)
+    l_d = image_crop(batched_image, [height - half_side, half_side], side)
+    r_u = image_crop(batched_image, [half_side, width - half_side], side)
+    r_d = image_crop(batched_image, [height - half_side, width - half_side], side)
 
-        return tf.stack([mid, l_u, l_d, r_u, r_d])
+    return tf.stack([mid, l_u, l_d, r_u, r_d])
+
+def _crop_along_h(image, height, width, side):
+	# crop 3 * 5, side * side image along height
+    batched_image = tf.reshape(image, [-1, height, width, 3])
+    half_height, half_width = tf.to_int32(height / 2), tf.to_int32(width / 2)
+    u = image_crop(batched_image, [half_width, half_width], width)
+    b_u = crop5(u, width, width, side)
+    m = image_crop(batched_image, [half_height, half_width], width)
+    b_m = crop5(m, width, width, side)
+    d = image_crop(batched_image, [height - half_width, half_width], width)
+    b_d = crop5(d, width, width, side)
+    return tf.concat([b_u, b_m, b_d], 0)
+
+def _crop_along_w(image, height, width, side):
+	# crop 3 * 5, side * side image along width
+    batched_image = tf.reshape(image, [-1, height, width, 3])
+    half_height, half_width = tf.to_int32(height / 2), tf.to_int32(width / 2)
+    l = image_crop(batched_image, [half_height, half_height], height)
+    b_l = crop5(l, height, height, side)
+    m = image_crop(batched_image, [half_height, half_width], height)
+    b_m = crop5(m, height, height, side)
+    r = image_crop(batched_image, [half_height, width - half_height], height)
+    b_r = crop5(r, height, height, side)
+    return tf.concat([b_l, b_m, b_r], 0)
+
+
+def val_preprocess_standard_10crop_eval(filename, label):
+    image_string = tf.read_file(filename)
+    image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
+    image = tf.cast(image_decoded, tf.float32)
+
+    smallest_side = input_size * 256 / 224.0 # keep scale constant
+    height, width = tf.to_float(tf.shape(image)[0]), tf.to_float(tf.shape(image)[1])
+
+    scale = tf.cond(tf.greater(height, width),
+                    lambda: smallest_side / width,
+                    lambda: smallest_side / height)
+    new_height, new_width = tf.to_int32(height * scale), tf.to_int32(width * scale)
+
+    resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
+    means = tf.reshape(tf.constant(IMAGENET_MEAN_RGB), [1, 1, 3])
+    centered_image = resized_image - means
+    flipped_image = tf.image.flip_left_right(centered_image)
+
+    return tf.concat([crop5(centered_image, new_height, new_width, input_size),
+                      crop5(flipped_image, new_height, new_width, input_size)], 0), label
 
 
 def get_dataset_10crop_eval(val_filenames, val_labels):
     """ take in val filenames and labels,
         return batched standard 10 crop of one image.
     """
-    def val_preprocess_standard_10crop_eval(filename, label):
-        image_string = tf.read_file(filename)
-        image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
-        image = tf.cast(image_decoded, tf.float32)
-
-        smallest_side = 256.0
-        height, width = tf.shape(image)[0], tf.shape(image)[1]
-        height = tf.to_float(height)
-        width = tf.to_float(width)
-
-        scale = tf.cond(tf.greater(height, width),
-                        lambda: smallest_side / width,
-                        lambda: smallest_side / height)
-        new_height = tf.to_int32(height * scale)
-        new_width = tf.to_int32(width * scale)
-
-        resized_image = tf.image.resize_images(image, [new_height, new_width],
-            method=tf.image.ResizeMethod.BICUBIC)  # (2)
-        means = tf.reshape(tf.constant(IMAGENET_MEAN_RGB), [1, 1, 3])
-        centered_image = resized_image - means
-        flipped_image = tf.image.flip_left_right(centered_image)
-
-        return tf.concat([crop5(centered_image, new_height, new_width),
-                          crop5(flipped_image, new_height, new_width)], 0), label
-
     # Validation dataset
     val_filenames = tf.constant(val_filenames)
     val_labels = tf.constant(val_labels)
@@ -242,34 +278,96 @@ def get_dataset_10crop_eval(val_filenames, val_labels):
     return images_10crop, labels, val_data_init_op
 
 
+def get_dataset_10crop_train_eval(train_filenames, train_labels, val_filenames, val_labels):
+    raise NotImplementedError("input size not constant 224")
+    """ take in train and validation filenames and labels,
+        return batched standard 10 crop of one image.
+    """
+    # Validation dataset
+    val_filenames = tf.constant(val_filenames)
+    val_labels = tf.constant(val_labels)
+    val_dataset = tf.contrib.data.Dataset.from_tensor_slices((val_filenames, val_labels))
+    val_dataset = val_dataset.map(val_preprocess_standard_10crop_eval,
+                                  num_threads=num_workers, output_buffer_size=num_workers)
+
+    # Training dataset
+    train_filenames = tf.constant(train_filenames)
+    train_labels = tf.constant(train_labels)
+    train_dataset = tf.contrib.data.Dataset.from_tensor_slices((train_filenames, train_labels))
+    train_dataset = train_dataset.map(val_preprocess_standard_10crop_eval,
+                                  num_threads=num_workers, output_buffer_size=num_workers)
+
+    assert val_dataset.output_types == train_dataset.output_types
+    assert val_dataset.output_shapes == train_dataset.output_shapes
+    iterator = tf.contrib.data.Iterator.from_structure(val_dataset.output_types,
+                                                       val_dataset.output_shapes)
+    images_10crop, labels = iterator.get_next()
+
+    val_data_init_op = iterator.make_initializer(val_dataset)
+    train_data_init_op = iterator.make_initializer(train_dataset)
+
+    return images_10crop, labels, train_data_init_op, val_data_init_op
+
+
+def get_dataset_30crop_eval(val_filenames, val_labels):
+    """ take in val filenames and labels,
+        return batched standard 30 crop of one image.
+    """
+
+    def val_preprocess_30crop_eval(filename, label):
+        image_string = tf.read_file(filename)
+        image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
+        image = tf.cast(image_decoded, tf.float32)
+
+        height, width = tf.to_float(tf.shape(image)[0]), tf.to_float(tf.shape(image)[1])
+
+        enumerate_small_side = [c.input_size * 256 / 224]
+        batched_image = [None for i in range(2)]
+        side = c.input_size
+        for i in range(1):
+            smallest_side = tf.to_float(enumerate_small_side[i])
+            scale = tf.cond(tf.greater(height, width),
+                        lambda: smallest_side / width,
+                        lambda: smallest_side / height)
+            new_height = tf.to_int32(height * scale)
+            new_width = tf.to_int32(width * scale)
+
+            resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
+            means = tf.reshape(tf.constant(IMAGENET_MEAN_RGB), [1, 1, 3])
+            centered_image = resized_image - means
+            flipped_image = tf.image.flip_left_right(centered_image)
+
+            batched_image[i * 2] = tf.cond(tf.greater(height, width),
+                lambda: _crop_along_h(centered_image, new_height, new_width, side),
+                lambda: _crop_along_w(centered_image, new_height, new_width, side))
+            batched_image[i * 2 + 1] = tf.cond(tf.greater(height, width),
+                lambda: _crop_along_h(flipped_image, new_height, new_width, side),
+                lambda: _crop_along_w(flipped_image, new_height, new_width, side))
+
+        return tf.concat(batched_image, 0), label
+
+    # Validation dataset
+    val_filenames = tf.constant(val_filenames)
+    val_labels = tf.constant(val_labels)
+    val_dataset = tf.contrib.data.Dataset.from_tensor_slices((val_filenames, val_labels))
+    val_dataset = val_dataset.map(val_preprocess_30crop_eval,
+                                  num_threads=num_workers, output_buffer_size=num_workers)
+
+    iterator = tf.contrib.data.Iterator.from_structure(val_dataset.output_types,
+                                                       val_dataset.output_shapes)
+    images_10crop, labels = iterator.get_next()
+
+    val_data_init_op = iterator.make_initializer(val_dataset)
+
+    return images_10crop, labels, val_data_init_op
+
+
 def get_dataset_90crop_eval(val_filenames, val_labels):
+    raise NotImplementedError("input size not constant 224")
     """ take in val filenames and labels,
         return batched standard 10 crop of one image.
     """
     def val_preprocess_90crop_eval(filename, label):
-
-        def _crop_along_h(image, height, width):
-            batched_image = tf.reshape(image, [-1, height, width, 3])
-            half_height, half_width = tf.to_int32(height / 2), tf.to_int32(width / 2)
-            u = image_crop(batched_image, [half_width, half_width], width)
-            b_u = crop5(u, width, width)
-            m = image_crop(batched_image, [half_height, half_width], width)
-            b_m = crop5(m, width, width)
-            d = image_crop(batched_image, [height - half_width, half_width], width)
-            b_d = crop5(d, width, width)
-            return tf.concat([b_u, b_m, b_d], 0)
-
-        def _crop_along_w(image, height, width):
-            batched_image = tf.reshape(image, [-1, height, width, 3])
-            half_height, half_width = tf.to_int32(height / 2), tf.to_int32(width / 2)
-            l = image_crop(batched_image, [half_height, half_height], height)
-            b_l = crop5(l, height, height)
-            m = image_crop(batched_image, [half_height, half_width], height)
-            b_m = crop5(m, height, height)
-            r = image_crop(batched_image, [half_height, width - half_height], height)
-            b_r = crop5(r, height, height)
-            return tf.concat([b_l, b_m, b_r], 0)
-
         image_string = tf.read_file(filename)
         image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
         image = tf.cast(image_decoded, tf.float32)
@@ -325,7 +423,7 @@ def get_dataset_10crop_eval_with_filename(val_filenames, val_labels):
         image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
         image = tf.cast(image_decoded, tf.float32)
 
-        smallest_side = 256.0
+        smallest_side = input_size * 256 / 224.0
         height, width = tf.shape(image)[0], tf.shape(image)[1]
         height = tf.to_float(height)
         width = tf.to_float(width)
@@ -341,8 +439,8 @@ def get_dataset_10crop_eval_with_filename(val_filenames, val_labels):
         centered_image = resized_image - means
         flipped_image = tf.image.flip_left_right(centered_image)
 
-        return tf.concat([_crop5(centered_image, new_height, new_width),
-                          _crop5(flipped_image, new_height, new_width)], 0), label, filename
+        return tf.concat([crop5(centered_image, new_height, new_width, input_size),
+                          crop5(flipped_image, new_height, new_width, input_size)], 0), label, filename
 
     # Validation dataset
     val_filenames = tf.constant(val_filenames)
@@ -367,7 +465,7 @@ def get_dataset_10crop_test(test_filenames):
         image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
         image = tf.cast(image_decoded, tf.float32)
 
-        smallest_side = 256.0
+        smallest_side = input_size * 256 / 224.0
         height, width = tf.shape(image)[0], tf.shape(image)[1]
         height = tf.to_float(height)
         width = tf.to_float(width)
@@ -383,8 +481,8 @@ def get_dataset_10crop_test(test_filenames):
         centered_image = resized_image - means
         flipped_image = tf.image.flip_left_right(centered_image)
 
-        return tf.concat([_crop5(centered_image, new_height, new_width),
-                          _crop5(flipped_image, new_height, new_width)], 0), filename
+        return tf.concat([crop5(centered_image, new_height, new_width, input_size),
+                          crop5(flipped_image, new_height, new_width, input_size)], 0), filename
 
     # test dataset
     test_filenames = tf.constant(test_filenames)
@@ -402,6 +500,7 @@ def get_dataset_10crop_test(test_filenames):
 
 
 def main():
+    raise NotImplementedError("input size not constant 224")
     train_filenames, train_labels = list_images('train')
     val_filenames, val_labels = list_images('validation')
 

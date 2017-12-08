@@ -43,11 +43,12 @@ IMAGENET_MEAN_RGB = [123.151630838, 115.902882574, 103.062623801]
 
 
 def inference(x, is_training,
-              num_classes=1000,
-              num_blocks=None,  
+              num_classes,
+              num_blocks,  
               use_bias=False,  # defaults to using batch norm
               bottleneck=True,
-              freeze_bn=False):
+              freeze_bn=False,
+              dropout_keep_prob=None):
 
     # assume x is rgb, not scaled, mean subtracted
     x = x * 1.0
@@ -55,15 +56,11 @@ def inference(x, is_training,
     # Convert RGB to BGR
     # already subtracted mean value in image preproccess
     red, green, blue = tf.split(axis=3, num_or_size_splits=3, value=x)
-    assert red.get_shape().as_list()[1:] == [224, 224, 1]
-    assert green.get_shape().as_list()[1:] == [224, 224, 1]
-    assert blue.get_shape().as_list()[1:] == [224, 224, 1]
+    assert red.get_shape().as_list()[1:] == [input_size, input_size, 1]
+    assert green.get_shape().as_list()[1:] == [input_size, input_size, 1]
+    assert blue.get_shape().as_list()[1:] == [input_size, input_size, 1]
     x = tf.concat(axis=3, values=[blue, green, red])
-    assert x.get_shape().as_list()[1:] == [224, 224, 3]
-
-    # defaults to 50-layer network
-    if num_blocks is None:
-        num_blocks = [3, 4, 6, 3]
+    assert x.get_shape().as_list()[1:] == [input_size, input_size, 3]
 
     c = Config()
     c['bottleneck'] = bottleneck
@@ -112,6 +109,10 @@ def inference(x, is_training,
 
     # post-net
     x = tf.reduce_mean(x, reduction_indices=[1, 2], name="avg_pool")
+
+    if dropout_keep_prob is not None:
+        print("x.get_shape() (input to fc layer): {}".format(x.get_shape()))
+    	x = tf.nn.dropout(x, dropout_keep_prob)
 
     if num_classes != None:
         with tf.variable_scope('fc'):
@@ -324,9 +325,9 @@ def get_variables_except_fc():
     all_variables = tf.get_collection(RESNET_VARIABLES)
     fc_variables = tf.get_collection(RESNET_FC_VARIABLES)
     list_v = [x for x in all_variables if x not in fc_variables]
-    print("len(all_variables): {}".format(len(all_variables)))
-    print("len(fc_variables): {}".format(len(fc_variables)))
-    print("len(list_v): {}".format(len(list_v)))
+    # print("len(all_variables): {}".format(len(all_variables)))
+    # print("len(fc_variables): {}".format(len(fc_variables)))
+    # print("len(list_v): {}".format(len(list_v)))
     return list_v
 
 
